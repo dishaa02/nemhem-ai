@@ -17,7 +17,7 @@ import docx
 app = FastAPI()
 
 # Get API keys from environment variables
-API_KEYS_STR = os.getenv("OPENROUTER_API_KEYS", "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")
+API_KEYS_STR = os.getenv("OPENROUTER_API_KEYS", "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,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")
 API_KEYS = [key.strip() for key in API_KEYS_STR.split(",") if key.strip()]
 
 # Get allowed origins from environment variables
@@ -56,8 +56,11 @@ def ask_model(data: PromptInput):
     # Shuffle keys to distribute load (optional)
     keys = API_KEYS.copy()
     random.shuffle(keys)
+    
+    print(f"🔑 Trying {len(keys)} API keys for request...")
 
-    for api_key in keys:
+    for i, api_key in enumerate(keys, 1):
+        print(f"🔑 Attempt {i}/{len(keys)} with key: {api_key[:10]}...{api_key[-4:]}")
         headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json"
@@ -70,8 +73,13 @@ def ask_model(data: PromptInput):
                 {"role": "user", "content": data.prompt}
             ]
         }
-        response = requests.post(BASE_URL, headers=headers, json=payload)
-        print(f"Status code: {response.status_code}, Response: {response.text}")
+        try:
+            response = requests.post(BASE_URL, headers=headers, json=payload, timeout=30)
+            print(f"Status code: {response.status_code}, Response: {response.text}")
+        except requests.exceptions.RequestException as e:
+            last_error = f"❌ API key ending in ...{api_key[-8:]} failed: Network error - {str(e)}"
+            print(f"Network error with API key, trying next key...")
+            continue
 
         if response.status_code == 200:
             try:
@@ -83,12 +91,16 @@ def ask_model(data: PromptInput):
             except Exception as e:
                 raise HTTPException(status_code=500, detail="Invalid response format: " + str(e))
 
-        # Rotate on 429 or 403
-        elif response.status_code in (429, 403):
-            last_error = f"❌ API key ending in ...{api_key[-8:]} failed: {response.status_code}"
+        # Rotate on 429, 403, 401, or any other error
+        elif response.status_code in (429, 403, 401, 400, 500, 502, 503, 504):
+            last_error = f"❌ API key ending in ...{api_key[-8:]} failed: {response.status_code} - {response.text}"
+            print(f"API key failed with status {response.status_code}, trying next key...")
             continue
         else:
-            raise HTTPException(status_code=response.status_code, detail=response.text)
+            # For any other unexpected status code, also try next key
+            last_error = f"❌ API key ending in ...{api_key[-8:]} failed: {response.status_code} - {response.text}"
+            print(f"Unexpected status {response.status_code}, trying next key...")
+            continue
 
     # All keys failed
     raise HTTPException(status_code=429, detail=f"All keys exhausted. Last error: {last_error or 'Unknown error'}")
@@ -113,7 +125,12 @@ def chain_models(data: ChainRequest):
                     {"role": "user", "content": current_prompt}
                 ]
             }
-            response = requests.post(BASE_URL, headers=headers, json=payload)
+            try:
+                response = requests.post(BASE_URL, headers=headers, json=payload, timeout=30)
+            except requests.exceptions.RequestException as e:
+                last_error = f"API key ending in ...{api_key[-8:]} failed: Network error - {str(e)}"
+                print(f"Chain: Network error with API key, trying next key...")
+                continue
             if response.status_code == 200:
                 try:
                     result = response.json()
@@ -123,11 +140,15 @@ def chain_models(data: ChainRequest):
                     break
                 except Exception as e:
                     raise HTTPException(status_code=500, detail="Invalid response format: " + str(e))
-            elif response.status_code in (429, 403, 401):
-                last_error = f"API key ending in ...{api_key[-8:]} failed: {response.status_code}"
+            elif response.status_code in (429, 403, 401, 400, 500, 502, 503, 504):
+                last_error = f"API key ending in ...{api_key[-8:]} failed: {response.status_code} - {response.text}"
+                print(f"Chain: API key failed with status {response.status_code}, trying next key...")
                 continue
             else:
-                raise HTTPException(status_code=response.status_code, detail=response.text)
+                # For any other unexpected status code, also try next key
+                last_error = f"API key ending in ...{api_key[-8:]} failed: {response.status_code} - {response.text}"
+                print(f"Chain: Unexpected status {response.status_code}, trying next key...")
+                continue
         else:
             responses.append({"model": model_id, "response": f"Error: All keys exhausted for {model_id}. Last error: {last_error or 'Unknown error'}"})
             current_prompt = data.prompt
