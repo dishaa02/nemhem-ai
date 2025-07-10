@@ -1,6 +1,6 @@
 // API service for communicating with the FastAPI backend
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'; // Update this to match your FastAPI server port
+export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'; // Update this to match your FastAPI server port
 
 export interface PromptInput {
   prompt: string;
@@ -94,6 +94,31 @@ export async function uploadFilesAPI(files: File[]) {
     method: 'POST',
     body: formData,
   });
+  if (!response.ok) throw new Error(await response.text());
+  return response.json();
+}
+
+// Tavily-powered search endpoints
+export async function searchYouTubeAPI(query: string, maxResults: number = 5) {
+  const response = await fetch(`${API_BASE_URL}/search/youtube?query=${encodeURIComponent(query)}&max_results=${maxResults}`);
+  if (!response.ok) throw new Error(await response.text());
+  return response.json();
+}
+
+export async function searchRedditAPI(query: string, maxResults: number = 5) {
+  const response = await fetch(`${API_BASE_URL}/search/reddit?query=${encodeURIComponent(query)}&max_results=${maxResults}`);
+  if (!response.ok) throw new Error(await response.text());
+  return response.json();
+}
+
+export async function searchAcademicAPI(query: string, maxResults: number = 5) {
+  const response = await fetch(`${API_BASE_URL}/search/academic?query=${encodeURIComponent(query)}&max_results=${maxResults}`);
+  if (!response.ok) throw new Error(await response.text());
+  return response.json();
+}
+
+export async function searchCryptoAPI(query: string, maxResults: number = 5) {
+  const response = await fetch(`${API_BASE_URL}/search/crypto?query=${encodeURIComponent(query)}&max_results=${maxResults}`);
   if (!response.ok) throw new Error(await response.text());
   return response.json();
 } 
