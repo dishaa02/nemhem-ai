@@ -11,12 +11,13 @@ import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Switch } from '@/components/ui/switch';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { apiService, chainModelsAPI, uploadFilesAPI } from '@/lib/api';
+import { apiService, chainModelsAPI, uploadFilesAPI, searchYouTubeAPI, searchRedditAPI, searchAcademicAPI, searchCryptoAPI } from '@/lib/api';
 
 import { models } from '@/components/ModelSelector';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeHighlight from 'rehype-highlight';
+import { API_BASE_URL } from '@/lib/api';
 
 // Chain Model Selector Component
 interface ChainModelSelectorProps {
@@ -133,6 +134,13 @@ function autoFormatMarkdown(text: string): string {
   return formatted.trim();
 }
 
+// Utility: Convert plain URLs to clickable links (for web search results)
+function linkify(text: string): string {
+  // Regex to match URLs
+  const urlRegex = /(https?:\/\/[\w\-._~:/?#[\]@!$&'()*+,;=%]+)(?![^<]*>|[^\[]*\])/g;
+  return text.replace(urlRegex, (url) => `<a href="${url}" target="_blank" rel="noopener noreferrer" style="color:#38bdf8;text-decoration:underline;">${url}</a>`);
+}
+
 export const ChatInterface = ({ chatId }: ChatInterfaceProps) => {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
@@ -142,6 +150,9 @@ export const ChatInterface = ({ chatId }: ChatInterfaceProps) => {
   const [backendConnected, setBackendConnected] = useState<boolean | null>(null);
   const [chainMode, setChainMode] = useState(false);
   const [selectedChainModels, setSelectedChainModels] = useState<string[]>(['mistralai/mistral-7b-instruct', 'deepseek/deepseek-chat']);
+  // Update the searchMode state type to include new modes
+  type SearchMode = 'web' | 'chat' | 'youtube' | 'reddit' | 'academic' | 'crypto';
+  const [searchMode, setSearchMode] = useState<SearchMode>('chat');
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [listening, setListening] = useState(false);
@@ -219,7 +230,6 @@ export const ChatInterface = ({ chatId }: ChatInterfaceProps) => {
       setMessages(prev => [...prev, errorMessage]);
       return;
     }
-
     let messageContent = input;
     let extractedText = '';
     if (uploadedFiles.length > 0) {
@@ -238,10 +248,9 @@ export const ChatInterface = ({ chatId }: ChatInterfaceProps) => {
         setMessages(prev => [...prev, errorMessage]);
       }
     }
-    // Do NOT append extractedText to messageContent for the user message
     const userMessage: Message = {
       id: Date.now().toString(),
-      content: input, // Only show what the user typed
+      content: input,
       isUser: true,
       timestamp: new Date()
     };
@@ -249,14 +258,223 @@ export const ChatInterface = ({ chatId }: ChatInterfaceProps) => {
     setInput('');
     setUploadedFiles([]);
     setIsLoading(true);
-    // But send the combined message to the backend
     let backendMessageContent = input;
     if (extractedText) {
       backendMessageContent += `\n\n${extractedText}`;
     }
-
+    // Auto-enhance YouTube queries
+    if (searchMode === 'youtube' && !/youtube|site:youtube\.com/i.test(backendMessageContent)) {
+      backendMessageContent += ' site:youtube.com';
+    }
+    // Auto-enhance Reddit queries
+    if (searchMode === 'reddit' && !/reddit|site:reddit\.com/i.test(backendMessageContent)) {
+      backendMessageContent += ' site:reddit.com';
+    }
     try {
-      if (chainMode && selectedChainModels.length > 1) {
+      if (searchMode === 'web') {
+        // Web search mode
+        const response = await fetch(`${API_BASE_URL}/search/web?query=${encodeURIComponent(backendMessageContent)}`);
+        let data;
+        let responseClone = response.clone();
+        try {
+          data = await response.json();
+        } catch (jsonErr) {
+          // If not JSON, show error message with raw text
+          const rawText = await responseClone.text();
+          const errorMessage: Message = {
+            id: `${Date.now()}-web-error`,
+            content: `❌ **Web Search Error**\n\nReceived invalid response from web search API.\n\n**Raw response:**\n\n\`\`\`\n${rawText.slice(0, 1000)}\n\`\`\`\nThis may be due to backend issues, API key problems, or network errors.`,
+            isUser: false,
+            model: 'Web Search',
+            timestamp: new Date(),
+            isError: true
+          };
+          setMessages(prev => [...prev, errorMessage]);
+          setIsLoading(false);
+          return;
+        }
+        const webLinks = data.results ? data.results.map((item: any) => `- [${item.title}](${item.url})`).join('\n\n') : JSON.stringify(data);
+        const webMessage: Message = {
+          id: `${Date.now()}-web`,
+          content: webLinks,
+          isUser: false,
+          model: 'Web Search',
+          timestamp: new Date(),
+          isChained: false
+        };
+        setMessages(prev => [...prev, webMessage]);
+        // Summarize links
+        const summaryPrompt = `Summarize the following web search results about "${input}":\n\n${webLinks}`;
+        try {
+          const summary = await apiService.askModel(summaryPrompt, selectedModel);
+          const summaryMessage: Message = {
+            id: `${Date.now()}-web-summary`,
+            content: summary.response,
+            isUser: false,
+            model: 'Web Search',
+            timestamp: new Date(),
+            isChained: false
+          };
+          setMessages(prev => [...prev, summaryMessage]);
+        } catch {}
+      } else if (searchMode === 'youtube') {
+        // YouTube search mode (fallback: filter for youtube.com links)
+        const data = await searchYouTubeAPI(backendMessageContent);
+        const ytVideos = Array.isArray(data.results)
+          ? data.results.filter((item: any) => item.url && item.url.includes('youtube.com'))
+          : [];
+        const ytLinks = ytVideos.length > 0
+          ? ytVideos.map((item: any) => `- [${item.title || item.url}](${item.url})`).join('\n')
+          : 'No YouTube video results found.';
+        const ytMessage: Message = {
+          id: `${Date.now()}-youtube`,
+          content: ytLinks,
+          isUser: false,
+          model: 'YouTube',
+          timestamp: new Date(),
+          isChained: false
+        };
+        setMessages(prev => [...prev, ytMessage]);
+        // Summarize links
+        if (ytVideos.length > 0) {
+          const summaryPrompt = `Summarize the following YouTube results about "${input}":\n\n${ytLinks}`;
+          try {
+            const summary = await apiService.askModel(summaryPrompt, selectedModel);
+            const summaryMessage: Message = {
+              id: `${Date.now()}-youtube-summary`,
+              content: summary.response,
+              isUser: false,
+              model: 'YouTube',
+              timestamp: new Date(),
+              isChained: false
+            };
+            setMessages(prev => [...prev, summaryMessage]);
+          } catch {}
+        }
+      } else if (searchMode === 'reddit') {
+        // Reddit search mode (fallback: filter for reddit.com links)
+        const data = await searchRedditAPI(backendMessageContent);
+        const redditPosts = Array.isArray(data.results)
+          ? data.results.filter((item: any) => item.url && item.url.includes('reddit.com'))
+          : [];
+        const redditLinks = redditPosts.length > 0
+          ? redditPosts.map((item: any) => `- [${item.title || item.url}](${item.url})`).join('\n')
+          : 'No Reddit posts found.';
+        const redditMessage: Message = {
+          id: `${Date.now()}-reddit`,
+          content: redditLinks,
+          isUser: false,
+          model: 'Reddit',
+          timestamp: new Date(),
+          isChained: false
+        };
+        setMessages(prev => [...prev, redditMessage]);
+        // Summarize links
+        if (redditPosts.length > 0) {
+          const summaryPrompt = `Summarize the following Reddit results about "${input}":\n\n${redditLinks}`;
+          try {
+            const summary = await apiService.askModel(summaryPrompt, selectedModel);
+            const summaryMessage: Message = {
+              id: `${Date.now()}-reddit-summary`,
+              content: summary.response,
+              isUser: false,
+              model: 'Reddit',
+              timestamp: new Date(),
+              isChained: false
+            };
+            setMessages(prev => [...prev, summaryMessage]);
+          } catch {}
+        }
+      } else if (searchMode === 'academic') {
+        // Academic search mode (filter for common academic sites, fallback to all results)
+        const data = await searchAcademicAPI(backendMessageContent);
+        const academicSites = [
+          'arxiv.org', 'semanticscholar.org', 'acm.org', 'ieee.org', 'nature.com',
+          'sciencedirect.com', 'springer.com', 'researchgate.net', 'jstor.org', 'biorxiv.org'
+        ];
+        let academicPapers = Array.isArray(data.results)
+          ? data.results.filter((item: any) =>
+              item.url && academicSites.some(site => item.url.includes(site))
+            )
+          : [];
+        // Fallback: if no academic-site matches, show all results
+        if (academicPapers.length === 0 && Array.isArray(data.results)) {
+          academicPapers = data.results;
+        }
+        const academicLinks = academicPapers.length > 0
+          ? academicPapers.map((item: any) => `- [${item.title || item.url}](${item.url})`).join('\n')
+          : 'No academic papers found.';
+        const academicMessage: Message = {
+          id: `${Date.now()}-academic`,
+          content: academicLinks,
+          isUser: false,
+          model: 'Academic',
+          timestamp: new Date(),
+          isChained: false
+        };
+        setMessages(prev => [...prev, academicMessage]);
+        // Summarize links
+        if (academicPapers.length > 0) {
+          const summaryPrompt = `Summarize the following academic results about "${input}":\n\n${academicLinks}`;
+          try {
+            const summary = await apiService.askModel(summaryPrompt, selectedModel);
+            const summaryMessage: Message = {
+              id: `${Date.now()}-academic-summary`,
+              content: summary.response,
+              isUser: false,
+              model: 'Academic',
+              timestamp: new Date(),
+              isChained: false
+            };
+            setMessages(prev => [...prev, summaryMessage]);
+          } catch {}
+        }
+      } else if (searchMode === 'crypto') {
+        // Crypto search mode (filter for common crypto/news sites, fallback to all results)
+        const data = await searchCryptoAPI(backendMessageContent);
+        const cryptoSites = [
+          'coindesk.com', 'cointelegraph.com', 'decrypt.co', 'blockworks.co', 'theblock.co',
+          'cryptoslate.com', 'bitcoinmagazine.com', 'coinmarketcap.com', 'binance.com', 'kraken.com',
+          'coinbase.com', 'yahoo.com', 'bloomberg.com', 'reuters.com', 'cnbc.com', 'forbes.com', 'ft.com'
+        ];
+        let cryptoNews = Array.isArray(data.results)
+          ? data.results.filter((item: any) =>
+              item.url && cryptoSites.some(site => item.url.includes(site))
+            )
+          : [];
+        // Fallback: if no crypto-site matches, show all results
+        if (cryptoNews.length === 0 && Array.isArray(data.results)) {
+          cryptoNews = data.results;
+        }
+        const cryptoLinks = cryptoNews.length > 0
+          ? cryptoNews.map((item: any) => `- [${item.title || item.url}](${item.url})`).join('\n')
+          : 'No crypto news found.';
+        const cryptoMessage: Message = {
+          id: `${Date.now()}-crypto`,
+          content: cryptoLinks,
+          isUser: false,
+          model: 'Crypto',
+          timestamp: new Date(),
+          isChained: false
+        };
+        setMessages(prev => [...prev, cryptoMessage]);
+        // Summarize links
+        if (cryptoNews.length > 0) {
+          const summaryPrompt = `Summarize the following crypto news results about "${input}":\n\n${cryptoLinks}`;
+          try {
+            const summary = await apiService.askModel(summaryPrompt, selectedModel);
+            const summaryMessage: Message = {
+              id: `${Date.now()}-crypto-summary`,
+              content: summary.response,
+              isUser: false,
+              model: 'Crypto',
+              timestamp: new Date(),
+              isChained: false
+            };
+            setMessages(prev => [...prev, summaryMessage]);
+          } catch {}
+        }
+      } else if (chainMode && selectedChainModels.length > 1) {
         // Chain mode: use multiple models
         const chainResponse = await chainModelsAPI(backendMessageContent, selectedChainModels);
         const finalResponse = chainResponse.responses[chainResponse.responses.length - 1].response;
@@ -461,33 +679,43 @@ export const ChatInterface = ({ chatId }: ChatInterfaceProps) => {
                     </div>
                   )}
                   {/* Markdown Message Content */}
-                  <div className={`prose prose-invert max-w-none ${message.isError ? 'text-red-100' : 'text-slate-100'}`}>
-                    <ReactMarkdown
-                      remarkPlugins={[remarkGfm]}
-                      rehypePlugins={[rehypeHighlight]}
-                      components={{
-                        code({node, inline, className, children, ...props}: any) {
-                          return !inline ? (
-                            <div className="relative group my-2">
-                              <pre className={`rounded-lg ${message.isError ? 'bg-red-900/80 border border-red-700/60' : 'bg-slate-900/80 border border-slate-700/60'} p-4 overflow-x-auto text-sm font-mono ${className || ''}`}
-                                {...props}
-                              >
-                                <code>{children}</code>
-                              </pre>
-                              <CopyButton
-                                text={String(children)}
-                              />
-                            </div>
-                          ) : (
-                            <code className={`${message.isError ? 'bg-red-800/70 text-red-200' : 'bg-slate-800/70 text-emerald-300'} px-1.5 py-0.5 rounded font-mono text-sm ${className || ''}`}>{children}</code>
-                          );
-                        }
-                      }}
-                    >
-                      {message.isUser ? message.content : autoFormatMarkdown(message.content)}
-                    </ReactMarkdown>
+                  <div className={`prose prose-invert max-w-none ${message.isError ? 'text-red-100' : (message.model === 'YouTube' || message.model === 'Reddit' || message.model === 'Academic') ? 'text-blue-400' : 'text-slate-100'}`}>
+                    {message.model === 'Web Search' && !message.isUser ? (
+                      <span
+                        dangerouslySetInnerHTML={{
+                          __html: linkify(autoFormatMarkdown(message.content)),
+                        }}
+                      />
+                    ) : (
+                      <ReactMarkdown
+                        remarkPlugins={[remarkGfm]}
+                        rehypePlugins={[rehypeHighlight]}
+                        components={{
+                          code({node, inline, className, children, ...props}: any) {
+                            return !inline ? (
+                              <div className="relative group my-2">
+                                <pre className={`rounded-lg ${message.isError ? 'bg-red-900/80 border border-red-700/60' : 'bg-slate-900/80 border border-slate-700/60'} p-4 overflow-x-auto text-sm font-mono ${className || ''}`}
+                                  {...props}
+                                >
+                                  <code>{children}</code>
+                                </pre>
+                                <CopyButton
+                                  text={String(children)}
+                                />
+                              </div>
+                            ) : (
+                              <code className={`${message.isError ? 'bg-red-800/70 text-red-200' : 'bg-slate-800/70 text-emerald-300'} px-1.5 py-0.5 rounded font-mono text-sm ${className || ''}`}>{children}</code>
+                            );
+                          },
+                          a({node, ...props}) {
+                            return <a {...props} target="_blank" rel="noopener noreferrer" className={message.model === 'YouTube' || message.model === 'Reddit' || message.model === 'Academic' || message.model === 'Crypto' ? 'text-blue-400 underline' : undefined} />;
+                          }
+                        }}
+                      >
+                        {message.isUser ? message.content : autoFormatMarkdown(message.content)}
+                      </ReactMarkdown>
+                    )}
                   </div>
-                  
                   {/* Chain Responses */}
                   {message.isChained && message.chainResponses && message.chainResponses.length > 1 && (
                     <div className="mt-4 space-y-3">
@@ -513,7 +741,6 @@ export const ChatInterface = ({ chatId }: ChatInterfaceProps) => {
               </div>
             </div>
           ))}
-          
           {isLoading && (
             <div className="flex gap-4 justify-start">
               <div className="flex gap-4 max-w-4xl">
@@ -530,11 +757,9 @@ export const ChatInterface = ({ chatId }: ChatInterfaceProps) => {
               </div>
             </div>
           )}
-          
           <div ref={messagesEndRef} />
         </div>
       </ScrollArea>
-
       {/* Input Area */}
       <div className="border-t border-slate-700/50 bg-slate-900/30 backdrop-blur-sm p-6 shadow-2xl">
         <div className="max-w-4xl mx-auto space-y-4">
@@ -559,7 +784,6 @@ export const ChatInterface = ({ chatId }: ChatInterfaceProps) => {
               ))}
             </div>
           )}
-
           {/* Controls */}
           <div className="flex items-center justify-between flex-wrap gap-4">
             <div className="flex items-center gap-6">
@@ -581,7 +805,6 @@ export const ChatInterface = ({ chatId }: ChatInterfaceProps) => {
                   </Badge>
                 )}
               </div>
-              
               {/* Chain Mode Warning */}
               {chainMode && selectedChainModels.length === 0 && (
                 <Alert className="bg-amber-900/20 border-amber-600/50 text-amber-300">
@@ -591,7 +814,20 @@ export const ChatInterface = ({ chatId }: ChatInterfaceProps) => {
                   </AlertDescription>
                 </Alert>
               )}
-              
+              {/* Search Mode Selector */}
+              <Select value={searchMode} onValueChange={v => setSearchMode(v as SearchMode)}>
+                <SelectTrigger className="w-[140px] h-8 px-2 text-xs bg-slate-800/50 border-slate-600 text-slate-400 hover:text-emerald-400 hover:border-emerald-500">
+                  <SelectValue placeholder="Search Mode" />
+                </SelectTrigger>
+                <SelectContent className="bg-slate-800 border-slate-700 shadow-2xl max-h-60">
+                  <SelectItem value="chat" className="text-white hover:bg-slate-700 focus:bg-slate-700 cursor-pointer">Chat</SelectItem>
+                  <SelectItem value="web" className="text-white hover:bg-slate-700 focus:bg-slate-700 cursor-pointer">Web Search</SelectItem>
+                  <SelectItem value="youtube" className="text-white hover:bg-slate-700 focus:bg-slate-700 cursor-pointer">YouTube</SelectItem>
+                  <SelectItem value="reddit" className="text-white hover:bg-slate-700 focus:bg-slate-700 cursor-pointer">Reddit</SelectItem>
+                  <SelectItem value="academic" className="text-white hover:bg-slate-700 focus:bg-slate-700 cursor-pointer">Academic</SelectItem>
+                  <SelectItem value="crypto" className="text-white hover:bg-slate-700 focus:bg-slate-700 cursor-pointer">Crypto</SelectItem>
+                </SelectContent>
+              </Select>
               {/* Model Selector */}
               {!chainMode ? (
                 <ModelSelector
@@ -606,7 +842,6 @@ export const ChatInterface = ({ chatId }: ChatInterfaceProps) => {
               )}
             </div>
           </div>
-          
           {/* Input */}
           <div className="flex gap-3 items-center">
             <div className="flex-1 relative flex items-center">
@@ -662,7 +897,6 @@ export const ChatInterface = ({ chatId }: ChatInterfaceProps) => {
           </div>
         </div>
       </div>
-      
       <Input
         ref={fileInputRef}
         type="file"
