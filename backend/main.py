@@ -17,7 +17,7 @@ import docx
 app = FastAPI()
 
 # Get API keys from environment variables
-API_KEYS_STR = "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"
+API_KEYS_STR = os.getenv("OPENROUTER_API_KEYS", "")
 API_KEYS = [key.strip() for key in API_KEYS_STR.split(",") if key.strip()]
 
 # Get allowed origins from environment variables
@@ -51,6 +51,8 @@ def health_check():
 # ✅ Main endpoint to send prompt and receive model response
 @app.post("/ask")
 def ask_model(data: PromptInput):
+    if not API_KEYS:
+        raise HTTPException(status_code=500, detail="OPENROUTER_API_KEYS not set in environment variables.")
     last_error = None
 
     # Shuffle keys to distribute load (optional)
@@ -182,7 +184,7 @@ def upload_files(files: List[UploadFile] = File(...)):
         extracted_texts.append({"filename": file.filename, "text": text})
     return {"files": extracted_texts}
 
-EXA_API_KEY = "79a27d38-21af-4824-ac2b-f111772390f0"
+EXA_API_KEY = os.getenv("EXA_API_KEY", "")
 
 @app.get("/search/web")
 def exa_web_search(query: str = Query(..., description="Search query")):
@@ -205,13 +207,15 @@ def exa_web_search(query: str = Query(..., description="Search query")):
     except Exception as e:
         return {"error": str(e)}
 
-TAVILY_API_KEY = "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"
+TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "")
 
 @app.get("/search/youtube")
 def tavily_youtube_search(query: str = Query(..., description="Search query"), max_results: int = 5):
     """
     Search YouTube videos using Tavily API.
     """
+    if not TAVILY_API_KEY:
+        return {"error": "TAVILY_API_KEY not set in environment variables."}
     url = "https://api.tavily.com/search"
     headers = {
         "Content-Type": "application/json",
@@ -240,6 +244,8 @@ def tavily_reddit_search(query: str = Query(..., description="Search query"), ma
     """
     Search Reddit posts using Tavily API.
     """
+    if not TAVILY_API_KEY:
+        return {"error": "TAVILY_API_KEY not set in environment variables."}
     url = "https://api.tavily.com/search"
     headers = {
         "Content-Type": "application/json",
@@ -268,6 +274,8 @@ def tavily_academic_search(query: str = Query(..., description="Search query"), 
     """
     Search academic papers using Tavily API.
     """
+    if not TAVILY_API_KEY:
+        return {"error": "TAVILY_API_KEY not set in environment variables."}
     url = "https://api.tavily.com/search"
     headers = {
         "Content-Type": "application/json",
@@ -296,6 +304,8 @@ def tavily_crypto_search(query: str = Query(..., description="Search query"), ma
     """
     Search crypto news using Tavily API.
     """
+    if not TAVILY_API_KEY:
+        return {"error": "TAVILY_API_KEY not set in environment variables."}
     url = "https://api.tavily.com/search"
     headers = {
         "Content-Type": "application/json",
